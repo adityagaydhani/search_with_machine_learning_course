@@ -11,11 +11,35 @@ from urllib.parse import urljoin
 import pandas as pd
 import fileinput
 import logging
+import re
 
+import fasttext
+import nltk
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
+
+class Model:
+    def __init__(self, model_path):
+        self.model = fasttext.load_model(model_path)
+        self.stemmer = nltk.stem.PorterStemmer()
+    
+    def get_top_labels(self, query, threshold=0.5):
+        transformed_query = query.lower()
+        transformed_query = re.sub(r"[^a-z0-9]", " ", transformed_query)
+        transformed_query = re.sub(r"\s+", " ", transformed_query).strip()
+        transformed_query = " ".join(self.stemmer.stem(token) for token in transformed_query.split())
+        output_labels = []
+        labels, prob_scores = self.model.predict(transformed_query, k=100)
+        cum_prob_score = 0
+        i = 0
+        while cum_prob_score < 0.5 and i < len(prob_scores):
+            output_labels.append(labels[i].removeprefix("__label__"))
+            cum_prob_score += prob_scores[i]
+            i += 1
+        
+        return output_labels
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -186,11 +210,20 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc"):
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", query_classifier_model=None):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"])
+    if query_classifier_model is not None:
+        categories = query_classifier_model.get_top_labels(query=user_query, threshold=0.5)
+        filters = {
+            "terms": {
+                "categoryPathIds": categories
+            }
+        }
+    else:
+        filters = None
+    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=["name", "shortDescription"])
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -212,6 +245,7 @@ if __name__ == "__main__":
                          help='The OpenSearch port')
     general.add_argument('--user',
                          help='The OpenSearch admin.  If this is set, the program will prompt for password too. If not set, use default of admin/admin')
+    general.add_argument('-q', '--query_classifier_model', help='Query classifier model')
 
     args = parser.parse_args()
 
@@ -238,15 +272,13 @@ if __name__ == "__main__":
         ssl_show_warn=False,
 
     )
+    query_classifier_model = Model(args.query_classifier_model) if args.query_classifier_model is not None else None
     index_name = args.index
-    query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
-    print(query_prompt)
-    for line in fileinput.input():
+    query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c): "
+    while (line := input(query_prompt)) != "Exit":
         query = line.rstrip()
         if query == "Exit":
             break
-        search(client=opensearch, user_query=query, index=index_name)
-
-        print(query_prompt)
+        search(client=opensearch, user_query=query, index=index_name, query_classifier_model=query_classifier_model)
 
     
