@@ -12,10 +12,14 @@ import pandas as pd
 import fileinput
 import logging
 
+from sentence_transformers import SentenceTransformer
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
+
+model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -186,11 +190,30 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc"):
+def create_vector_query(user_query, size):
+     vector = model.encode([user_query])[0].tolist()
+     query_obj = {
+         "size": size,
+         "query": {
+             "knn": {
+                 "embedding": {
+                     "vector": vector,
+                     "k": size
+                 }
+             }
+         },
+         "_source": ["name", "shortDescription"]
+     }
+     return query_obj
+
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_vector=False):
     #### W3: classify the query
     #### W3: create filters and boosts
     # Note: you may also want to modify the `create_query` method above
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"])
+    if use_vector:
+        query_obj = create_vector_query(user_query, size=10)
+    else:
+        query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=["name", "shortDescription"])
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -212,6 +235,7 @@ if __name__ == "__main__":
                          help='The OpenSearch port')
     general.add_argument('--user',
                          help='The OpenSearch admin.  If this is set, the program will prompt for password too. If not set, use default of admin/admin')
+    general.add_argument("--use_vector", action=argparse.BooleanOptionalAction, default=False)
 
     args = parser.parse_args()
 
@@ -239,14 +263,6 @@ if __name__ == "__main__":
 
     )
     index_name = args.index
-    query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
-    print(query_prompt)
-    for line in fileinput.input():
+    while (line:=input("Enter your query (type 'Exit' to exit or hit ctrl-c)")) != "Exit":
         query = line.rstrip()
-        if query == "Exit":
-            break
-        search(client=opensearch, user_query=query, index=index_name)
-
-        print(query_prompt)
-
-    
+        search(client=opensearch, user_query=query, index=index_name, use_vector=args.use_vector)
